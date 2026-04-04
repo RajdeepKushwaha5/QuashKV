@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quashkv"
+version = "0.1.0"
+description = "Near-optimal KV cache compression and vector quantization based on TurboQuant"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "QuashKV Contributors"},
+]
+keywords = ["quantization", "kv-cache", "llm", "vector-search", "compression"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.1",
+    "scipy>=1.10",
+    "numpy>=1.24",
+]
+
+[project.urls]
+Repository = "https://github.com/quashkv/quashkv"
+
+[project.optional-dependencies]
+triton = ["triton>=3.0"]
+vllm = ["vllm>=0.4"]
+bench = ["transformers>=4.40", "datasets", "matplotlib", "pandas"]
+dev = ["pytest>=7.0", "pytest-benchmark"]
+all = ["quashkv[triton,bench,dev]"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
