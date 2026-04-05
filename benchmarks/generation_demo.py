@@ -133,24 +133,63 @@ def _extract_kv_pairs(past_key_values, num_layers):
 
     Works with DynamicCache (4.36+), transformers 5.x, and legacy tuples.
     """
-    # Try DynamicCache.key_cache attribute (transformers 4.36-4.x)
+    # Method 1: key_cache / value_cache lists (transformers 4.36-4.x)
     if hasattr(past_key_values, "key_cache") and hasattr(past_key_values, "value_cache"):
-        return [(past_key_values.key_cache[i], past_key_values.value_cache[i])
-                for i in range(num_layers)]
+        kc = past_key_values.key_cache
+        vc = past_key_values.value_cache
+        if isinstance(kc, list) and len(kc) > 0:
+            return [(kc[i], vc[i]) for i in range(num_layers)]
 
-    # Try indexing (transformers 5.x DynamicCache or legacy tuples)
-    pairs = []
-    for i in range(num_layers):
-        item = past_key_values[i]
-        if isinstance(item, (list, tuple)):
-            pairs.append((item[0], item[1]))
-        elif hasattr(item, "key_state") and hasattr(item, "value_state"):
-            pairs.append((item.key_state, item.value_state))
-        else:
-            # Last resort: assume it's a 2-tuple-like object
-            k, v = item
-            pairs.append((k, v))
-    return pairs
+    # Method 2: to_legacy_cache() (some transformers versions)
+    if hasattr(past_key_values, "to_legacy_cache"):
+        legacy = past_key_values.to_legacy_cache()
+        return [(legacy[i][0], legacy[i][1]) for i in range(num_layers)]
+
+    # Method 3: iteration
+    try:
+        pairs = []
+        for item in past_key_values:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                pairs.append((item[0], item[1]))
+            elif hasattr(item, "key") and hasattr(item, "value"):
+                pairs.append((item.key, item.value))
+            elif hasattr(item, "key_state") and hasattr(item, "value_state"):
+                pairs.append((item.key_state, item.value_state))
+            else:
+                k, v = item
+                pairs.append((k, v))
+        if len(pairs) == num_layers:
+            return pairs
+    except (TypeError, ValueError):
+        pass
+
+    # Method 4: direct subscript
+    try:
+        return [(past_key_values[i][0], past_key_values[i][1])
+                for i in range(num_layers)]
+    except (TypeError, KeyError, IndexError):
+        pass
+
+    # Method 5: probe internal attributes
+    for attr in ("_cache", "cache", "_data", "layers"):
+        if hasattr(past_key_values, attr):
+            internal = getattr(past_key_values, attr)
+            if isinstance(internal, (list, tuple)) and len(internal) >= num_layers:
+                pairs = []
+                for item in internal:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        pairs.append((item[0], item[1]))
+                    elif hasattr(item, "key") and hasattr(item, "value"):
+                        pairs.append((item.key, item.value))
+                    elif hasattr(item, "keys") and hasattr(item, "values"):
+                        pairs.append((item.keys, item.values))
+                if len(pairs) == num_layers:
+                    return pairs
+
+    raise RuntimeError(
+        f"Cannot extract KV pairs from {type(past_key_values).__name__}. "
+        f"Attrs: {[a for a in dir(past_key_values) if not a.startswith('__')]}"
+    )
 
 
 # ======================================================================
@@ -236,21 +275,18 @@ def generate_compressed(model, input_ids, max_new_tokens, bits, seed,
 
         # Forward pass with just the new token
         # We need to provide the decompressed KV as past_key_values
-        # Build a DynamicCache with our decompressed tensors
+        # Use tuple-of-tuples format which is universally supported
         model_dtype = next(model.parameters()).dtype
 
-        from transformers import DynamicCache
-        hf_cache = DynamicCache()
-        for layer_idx in range(num_layers):
-            k, v = cache[layer_idx]
-            k_dec = k.to(model_dtype)
-            v_dec = v.to(model_dtype)
-            # Use the update() method which works across transformers versions
-            hf_cache.update(k_dec, v_dec, layer_idx)
+        past_kv_tuple = tuple(
+            (k.to(model_dtype), v.to(model_dtype))
+            for layer_idx in range(num_layers)
+            for k, v in [cache[layer_idx]]
+        )
 
         outputs = model(
             input_ids=next_token,
-            past_key_values=hf_cache,
+            past_key_values=past_kv_tuple,
             use_cache=True,
         )
         last_logits = outputs.logits[:, -1, :]
@@ -264,7 +300,7 @@ def generate_compressed(model, input_ids, max_new_tokens, bits, seed,
             cache.update(nk[:, :, -1:, :].float(), nv[:, :, -1:, :].float(),
                          layer_idx=layer_idx)
 
-        del hf_cache, past_kv_tuple, outputs, new_kv
+        del past_kv_tuple, outputs, new_kv
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
