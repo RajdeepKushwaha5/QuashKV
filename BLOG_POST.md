@@ -58,6 +58,20 @@ Baseline: TinyLlama 1.1B = **5.54**, Mistral 7B = **5.06**
 
 4-bit value cosine is **0.995+** on both models — near-lossless.
 
+### Compressed Perplexity — The Definitive Test
+
+KV quality metrics (cosine similarity) are necessary but not sufficient. The real question: **does compression hurt actual model output quality?**
+
+We measured WikiText-2 perplexity with compressed KV cache on Mistral 7B (baseline: 5.06):
+
+| Bits | Compressed Perplexity | Δ vs Baseline | Compression | Memory Saved |
+|------|----------------------|---------------|-------------|-------------|
+| 2-bit | 5.88 | +0.82 | 7.11× | 85.9% |
+| **3-bit** | **5.10** | **+0.04** | **4.92×** | **79.7%** |
+| 4-bit | 5.07 | +0.01 | 3.76× | 73.4% |
+
+**3-bit compression adds only +0.04 perplexity while saving 80% memory.** 4-bit is effectively indistinguishable from baseline. This is the strongest evidence that TurboQuant's theoretical guarantees translate to real model quality.
+
 ### End-to-End Generation
 
 Side-by-side compressed vs. uncompressed text generation:

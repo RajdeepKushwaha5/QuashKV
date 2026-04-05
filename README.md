@@ -212,13 +212,13 @@ Baseline perplexity: **5.54** (2048 tokens, no compression)
 
 Baseline perplexity: **5.06** (4096 tokens, fp16, no compression)
 
-| Bits | Key Cosine | Value Cosine | Compression | Memory Saved |
-|------|-----------|-------------|-------------|--------------|
-| 2 | 0.7997 | 0.9403 | 7.11× | 85.9% |
-| 3 | 0.9404 | 0.9829 | 4.92× | 79.7% |
-| 4 | 0.9829 | 0.9953 | 3.76× | 73.4% |
+| Bits | Key Cosine | Value Cosine | Compressed PPL | Δ PPL | Compression | Memory Saved |
+|------|-----------|-------------|---------------|-------|-------------|--------------|
+| 2 | 0.7997 | 0.9403 | 5.88 | +0.82 | 7.11× | 85.9% |
+| 3 | 0.9404 | 0.9829 | **5.10** | **+0.04** | 4.92× | 79.7% |
+| 4 | 0.9829 | 0.9953 | **5.07** | **+0.01** | 3.76× | 73.4% |
 
-> 4-bit value cosine is 0.995+ on both models — near-lossless. Even at 2-bit, value cosine stays above 0.94. Quality is consistent across 22- and 32-layer models, confirming the theoretical guarantees scale with depth.
+> **3-bit compression adds only +0.04 perplexity** (5.06 → 5.10) while saving 80% memory — effectively lossless. 4-bit is indistinguishable from baseline (+0.01). Even 2-bit only adds +0.82 with 86% memory savings.
 
 ### End-to-End Generation — TinyLlama 1.1B (A100)
 

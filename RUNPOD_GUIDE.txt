@@ -169,4 +169,25 @@
 
   Total time: ~15 min.  Cost: ~$0.40.
 
+
+11. COMPRESSED PERPLEXITY SPRINT
+---------------------------------
+  Measures actual model perplexity with compressed KV cache.
+  This is the definitive "compression barely hurts quality" proof.
+
+  If starting from a fresh pod, do Section 10 Steps 1-4 first.
+  If already in a running pod with QuashKV installed:
+
+    cd /workspace/QuashKV
+
+  Command 7 — TinyLlama compressed perplexity (~2 min):
+
+    python benchmarks/perplexity_eval.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --bits 2 3 4 --max-tokens 2048 --compressed-ppl
+
+  Command 8 — Mistral 7B compressed perplexity (~5-10 min):
+
+    python benchmarks/perplexity_eval.py --model mistralai/Mistral-7B-v0.3 --bits 2 3 4 --max-tokens 4096 --dtype float16 --compressed-ppl
+
+  Copy the FULL output from both commands and paste it back.
+
 ================================================================
