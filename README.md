@@ -17,7 +17,7 @@ QuashKV compresses high-dimensional vectors (LLM key/value caches, embedding dat
 | Inner product quantizer | (b-1)-bit MSE + 1-bit QJL for unbiased IP estimation |
 | Bit-packing | 1/2/3/4-bit packing with lossless round-trip |
 | Mixed precision | Per-channel adaptive bit allocation (outlier channels get more bits) |
-| Fused kernels | PyTorch fallbacks + Triton GPU kernel stubs |
+| Fused kernels | PyTorch fallbacks + Triton GPU kernels (compress, decompress, fused attention) |
 | HF cache | Drop-in `DynamicCache` replacement for HuggingFace models |
 | vLLM backend | `QuashKVModelManager` for vLLM serving integration |
 | NN search | `QuashIndex` for approximate maximum inner-product search |
@@ -211,7 +211,7 @@ pytest
 | Aspect | QuashKV | Anirudh's cuTile impl | KIVI | PolarQuant |
 |--------|---------|----------------------|------|------------|
 | Hardware | Any GPU (A100/H100/4090) | B200 only | Any | Any |
-| Kernel framework | PyTorch + Triton stubs | cuTile (Blackwell-locked) | PyTorch | PyTorch |
+| Kernel framework | PyTorch + Triton kernels | cuTile (Blackwell-locked) | PyTorch | PyTorch |
 | Vector search | Full NN search module | Not implemented | N/A | N/A |
 | Outlier handling | Mixed-precision adaptive | Not implemented | Per-channel | None |
 | Serving integration | vLLM + HuggingFace | Standalone notebook | HuggingFace | HuggingFace |

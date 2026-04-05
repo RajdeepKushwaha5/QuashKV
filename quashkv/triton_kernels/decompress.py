@@ -109,16 +109,82 @@ if HAS_TRITON:
     ):
         """Triton kernel: fused centroid-gather → un-rotate → rescale.
 
-        Algorithm:
-          1. Load centroids table into shared memory (tiny: ≤16 floats)
-          2. Load indices[row, :], gather centroids → rotated_hat
-          3. Un-rotate: output[j] = dot(rotated_hat, Pi[:, j])
-          4. Multiply by norms[row]
-
-        The centroid gather is essentially a tiny LUT in shared memory.
+        Grid: (N,) where N = total number of vectors.
+        Each program reconstructs one d-dimensional vector.
         """
-        # TODO: implement when GPU is available
-        pass
+        row = tl.program_id(0)
+        col_offsets = tl.arange(0, d)
+
+        # 1. Load indices and gather centroids (tiny LUT: <=16 entries)
+        idx_ptrs = idx_ptr + row * stride_idx_row + col_offsets
+        indices = tl.load(idx_ptrs).to(tl.int32)
+
+        centroid_vals = tl.zeros([d], dtype=tl.float32)
+        for c_idx in tl.static_range(n_levels):
+            c_val = tl.load(centroids_ptr + c_idx)
+            centroid_vals = tl.where(indices == c_idx, c_val, centroid_vals)
+
+        # 2. Un-rotate: out[j] = dot(centroid_vals, Pi[:, j]) = dot(centroid_vals, Pi[j, :])
+        #    Since Pi is orthogonal, un-rotate = multiply by Pi (not Pi^T).
+        #    But the PyTorch ref does x_rot_hat @ Pi, which for row vectors means
+        #    out[j] = sum_k centroid_vals[k] * Pi[k, j].
+        #    We compute this as: for each output dim j, dot centroid_vals with Pi column j.
+        #    Pi column j = Pi[0,j], Pi[1,j], ... = Pi_ptr + j + k*stride_Pi_row
+        norm = tl.load(norms_ptr + row)
+
+        out_vals = tl.zeros([d], dtype=tl.float32)
+        for j in tl.static_range(d):
+            # Load Pi[:, j] — column j of Pi
+            Pi_col_ptrs = Pi_ptr + col_offsets * stride_Pi_row + j
+            Pi_col = tl.load(Pi_col_ptrs)
+            dot_val = tl.sum(centroid_vals * Pi_col, axis=0)
+            out_vals = tl.where(col_offsets == j, dot_val * norm, out_vals)
+
+        # 3. Store
+        out_ptrs = out_ptr + row * stride_out_row + col_offsets
+        tl.store(out_ptrs, out_vals)
+
+    @triton.jit
+    def _decompress_ip_kernel(
+        mse_idx_ptr, qjl_ptr, norms_ptr, Pi_ptr, centroids_ptr, S_ptr,
+        out_ptr,
+        d: tl.constexpr, n_levels: tl.constexpr,
+        qjl_scale,
+        stride_idx_row, stride_Pi_row, stride_out_row,
+    ):
+        """Triton kernel: fused IP decompression (MSE + QJL → un-rotate → rescale).
+
+        Grid: (N,) where N = total number of vectors.
+        """
+        row = tl.program_id(0)
+        col_offsets = tl.arange(0, d)
+
+        # 1. Load MSE indices and gather centroids
+        mse_indices = tl.load(mse_idx_ptr + row * stride_idx_row + col_offsets).to(tl.int32)
+        mse_vals = tl.zeros([d], dtype=tl.float32)
+        for c_idx in tl.static_range(n_levels):
+            c_val = tl.load(centroids_ptr + c_idx)
+            mse_vals = tl.where(mse_indices == c_idx, c_val, mse_vals)
+
+        # 2. QJL component: qjl_scale * S * (2*sign - 1)
+        qjl_signs = tl.load(qjl_ptr + row * stride_idx_row + col_offsets).to(tl.float32)
+        S = tl.load(S_ptr + col_offsets)
+        sign_vals = qjl_signs * 2.0 - 1.0
+        qjl_vals = qjl_scale * S * sign_vals
+
+        # 3. Combined rotated-space representation
+        combined = mse_vals + qjl_vals
+
+        # 4. Un-rotate and scale
+        norm = tl.load(norms_ptr + row)
+        out_vals = tl.zeros([d], dtype=tl.float32)
+        for j in tl.static_range(d):
+            Pi_col_ptrs = Pi_ptr + col_offsets * stride_Pi_row + j
+            Pi_col = tl.load(Pi_col_ptrs)
+            dot_val = tl.sum(combined * Pi_col, axis=0)
+            out_vals = tl.where(col_offsets == j, dot_val * norm, out_vals)
+
+        tl.store(out_ptr + row * stride_out_row + col_offsets, out_vals)
 
 
 # ======================================================================
@@ -145,8 +211,24 @@ def fused_decompress_mse(
     x_hat : (..., d) float32
     """
     if HAS_TRITON and indices.is_cuda:
-        # TODO: launch _decompress_mse_kernel
-        pass
+        orig_shape = indices.shape
+        d = orig_shape[-1]
+        idx_flat = indices.reshape(-1, d).contiguous()
+        N = idx_flat.shape[0]
+        norms_flat = norms.reshape(-1).contiguous().float()
+        Pi_c = Pi.contiguous().float()
+        cents_c = centroids.contiguous().float()
+
+        out = torch.empty(N, d, dtype=torch.float32, device=indices.device)
+        n_levels = cents_c.shape[0]
+        _decompress_mse_kernel[(N,)](
+            idx_flat, norms_flat, Pi_c, cents_c, out,
+            d=d, n_levels=n_levels,
+            stride_idx_row=idx_flat.stride(0),
+            stride_Pi_row=Pi_c.stride(0),
+            stride_out_row=out.stride(0),
+        )
+        return out.reshape(*orig_shape)
     return _decompress_mse_pytorch(indices, norms, Pi, centroids)
 
 
@@ -176,8 +258,28 @@ def fused_decompress_ip(
     x_hat : (..., d) float32
     """
     if HAS_TRITON and mse_indices.is_cuda:
-        # TODO: launch Triton kernel
-        pass
+        orig_shape = mse_indices.shape
+        d = orig_shape[-1]
+        idx_flat = mse_indices.reshape(-1, d).contiguous()
+        qjl_flat = qjl_signs.reshape(-1, d).contiguous()
+        N = idx_flat.shape[0]
+        norms_flat = norms.reshape(-1).contiguous().float()
+        Pi_c = Pi.contiguous().float()
+        cents_c = centroids.contiguous().float()
+        S_c = S.contiguous().float()
+
+        out = torch.empty(N, d, dtype=torch.float32, device=mse_indices.device)
+        n_levels = cents_c.shape[0]
+        _decompress_ip_kernel[(N,)](
+            idx_flat, qjl_flat, norms_flat, Pi_c, cents_c, S_c,
+            out,
+            d=d, n_levels=n_levels,
+            qjl_scale=qjl_scale,
+            stride_idx_row=idx_flat.stride(0),
+            stride_Pi_row=Pi_c.stride(0),
+            stride_out_row=out.stride(0),
+        )
+        return out.reshape(*orig_shape)
     return _decompress_ip_pytorch(
         mse_indices, qjl_signs, norms, Pi, centroids, S, qjl_scale,
     )

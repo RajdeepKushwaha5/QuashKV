@@ -113,34 +113,95 @@ if HAS_TRITON:
     ):
         """Triton kernel: fused normalize → rotate → quantize for one vector.
 
-        Algorithm:
-          1. Load x[row, :] from global memory
-          2. Compute norm = sqrt(sum(x²)), normalize in registers
-          3. For each output coordinate j:
-             rotated_j = dot(x_normalized, Pi[j, :])
-             index_j = binary search in boundaries
-          4. Write indices and norm back
-
-        Block mapping: one program per (row × output_tile).
-        For d=128, entire rotation fits in one program's registers.
+        Grid: (N,) where N = total number of vectors (product of batch dims).
+        Each program processes one d-dimensional vector.
         """
-        # TODO: implement when GPU is available
-        pass
+        row = tl.program_id(0)
+        col_offsets = tl.arange(0, d)
+
+        # 1. Load x[row, :]
+        x_ptrs = x_ptr + row * stride_x_row + col_offsets
+        x = tl.load(x_ptrs)
+
+        # 2. Compute norm and normalize
+        norm_sq = tl.sum(x * x, axis=0)
+        norm = tl.sqrt(norm_sq + 1e-16)
+        x_unit = x / norm
+
+        # 3. Rotate: x_rot[j] = dot(x_unit, Pi[j, :]) for all j
+        #    We iterate over output coordinates, doing dot products
+        x_rot = tl.zeros([d], dtype=tl.float32)
+        for j in tl.static_range(d):
+            Pi_row_ptrs = Pi_ptr + j * stride_Pi_row + col_offsets
+            Pi_row = tl.load(Pi_row_ptrs)
+            dot_val = tl.sum(x_unit * Pi_row, axis=0)
+            # Store rotated value at position j
+            x_rot = tl.where(col_offsets == j, dot_val, x_rot)
+
+        # 4. Boundary quantization via linear scan
+        #    For small n_bounds (<=15 for 4-bit), this is efficient
+        bounds = tl.load(bounds_ptr + tl.arange(0, n_bounds))
+        indices = tl.zeros([d], dtype=tl.int32)
+        for b_idx in tl.static_range(n_bounds):
+            bound_val = tl.load(bounds_ptr + b_idx)
+            indices += tl.where(x_rot > bound_val, 1, 0).to(tl.int32)
+
+        # 5. Store results
+        idx_ptrs = idx_ptr + row * d + col_offsets
+        tl.store(idx_ptrs, indices.to(tl.uint8))
+        tl.store(norms_ptr + row, norm)
 
     @triton.jit
     def _compress_ip_kernel(
-        x_ptr, Pi_ptr, bounds_ptr, S_ptr,
+        x_ptr, Pi_ptr, bounds_ptr, S_ptr, centroids_ptr,
         mse_idx_ptr, qjl_ptr, norms_ptr,
-        d: tl.constexpr, n_bounds: tl.constexpr,
+        d: tl.constexpr, n_bounds: tl.constexpr, n_centroids: tl.constexpr,
         stride_x_row, stride_Pi_row,
     ):
-        """Triton kernel: fused normalize → rotate → MSE quantize → QJL.
+        """Triton kernel: fused normalize → rotate → MSE quantize → QJL sign.
 
-        Same as _compress_mse_kernel but adds the QJL sign computation:
-          qjl[j] = 1 if S[j] * rotated[j] > 0 else 0
+        Grid: (N,) where N = total number of vectors.
         """
-        # TODO: implement when GPU is available
-        pass
+        row = tl.program_id(0)
+        col_offsets = tl.arange(0, d)
+
+        # 1. Load and normalize
+        x_ptrs = x_ptr + row * stride_x_row + col_offsets
+        x = tl.load(x_ptrs)
+        norm_sq = tl.sum(x * x, axis=0)
+        norm = tl.sqrt(norm_sq + 1e-16)
+        x_unit = x / norm
+
+        # 2. Rotate
+        x_rot = tl.zeros([d], dtype=tl.float32)
+        for j in tl.static_range(d):
+            Pi_row_ptrs = Pi_ptr + j * stride_Pi_row + col_offsets
+            Pi_row = tl.load(Pi_row_ptrs)
+            dot_val = tl.sum(x_unit * Pi_row, axis=0)
+            x_rot = tl.where(col_offsets == j, dot_val, x_rot)
+
+        # 3. MSE boundary quantization
+        indices = tl.zeros([d], dtype=tl.int32)
+        for b_idx in tl.static_range(n_bounds):
+            bound_val = tl.load(bounds_ptr + b_idx)
+            indices += tl.where(x_rot > bound_val, 1, 0).to(tl.int32)
+
+        # 4. Gather MSE centroids and compute residual
+        #    centroid_vals[j] = centroids[indices[j]]
+        centroid_vals = tl.zeros([d], dtype=tl.float32)
+        for c_idx in tl.static_range(n_centroids):
+            centroid_val = tl.load(centroids_ptr + c_idx)
+            centroid_vals = tl.where(indices == c_idx, centroid_val, centroid_vals)
+        residual = x_rot - centroid_vals
+
+        # 5. QJL sign: sign[j] = 1 if S[j] * residual[j] >= 0 else 0
+        S = tl.load(S_ptr + col_offsets)
+        qjl_signs = tl.where(residual * S >= 0, 1, 0)
+
+        # 6. Store
+        tl.store(mse_idx_ptr + row * d + col_offsets, indices.to(tl.uint8))
+        tl.store(qjl_ptr + row * d + col_offsets, qjl_signs.to(tl.uint8))
+        tl.store(norms_ptr + row, norm)
 
 
 # ======================================================================
@@ -168,8 +229,24 @@ def fused_compress_mse(
     norms : (...) float32
     """
     if HAS_TRITON and x.is_cuda:
-        # TODO: launch _compress_mse_kernel
-        pass
+        orig_shape = x.shape
+        d = orig_shape[-1]
+        x_flat = x.reshape(-1, d).contiguous().float()
+        N = x_flat.shape[0]
+        Pi_c = Pi.contiguous().float()
+        bounds_c = boundaries.contiguous().float()
+
+        idx_out = torch.empty(N, d, dtype=torch.uint8, device=x.device)
+        norms_out = torch.empty(N, dtype=torch.float32, device=x.device)
+
+        n_bounds = bounds_c.shape[0]
+        _compress_mse_kernel[(N,)](
+            x_flat, Pi_c, bounds_c, idx_out, norms_out,
+            d=d, n_bounds=n_bounds,
+            stride_x_row=x_flat.stride(0),
+            stride_Pi_row=Pi_c.stride(0),
+        )
+        return idx_out.reshape(*orig_shape), norms_out.reshape(*orig_shape[:-1])
     return _compress_mse_pytorch(x, Pi, boundaries)
 
 
@@ -197,6 +274,31 @@ def fused_compress_ip(
     norms : (...) float32
     """
     if HAS_TRITON and x.is_cuda:
-        # TODO: launch _compress_ip_kernel
-        pass
+        orig_shape = x.shape
+        d = orig_shape[-1]
+        x_flat = x.reshape(-1, d).contiguous().float()
+        N = x_flat.shape[0]
+        Pi_c = Pi.contiguous().float()
+        bounds_c = boundaries.contiguous().float()
+        S_c = S.contiguous().float()
+        cents_c = centroids.contiguous().float()
+
+        mse_out = torch.empty(N, d, dtype=torch.uint8, device=x.device)
+        qjl_out = torch.empty(N, d, dtype=torch.uint8, device=x.device)
+        norms_out = torch.empty(N, dtype=torch.float32, device=x.device)
+
+        n_bounds = bounds_c.shape[0]
+        n_centroids = cents_c.shape[0]
+        _compress_ip_kernel[(N,)](
+            x_flat, Pi_c, bounds_c, S_c, cents_c,
+            mse_out, qjl_out, norms_out,
+            d=d, n_bounds=n_bounds, n_centroids=n_centroids,
+            stride_x_row=x_flat.stride(0),
+            stride_Pi_row=Pi_c.stride(0),
+        )
+        return (
+            mse_out.reshape(*orig_shape),
+            qjl_out.reshape(*orig_shape),
+            norms_out.reshape(*orig_shape[:-1]),
+        )
     return _compress_ip_pytorch(x, Pi, boundaries, S, centroids)
