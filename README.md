@@ -181,16 +181,57 @@ Quality is **perfectly stable** — identical cosine similarity at 8.5x longer s
 
 See [`notebooks/kaggle_validation.ipynb`](notebooks/kaggle_validation.ipynb) for the full reproducible notebook.
 
-## Benchmarks
+## A100 GPU Benchmarks
 
-Run the included benchmarks:
+All numbers collected on an NVIDIA A100-SXM4-80GB, PyTorch 2.8.0+cu128, Triton enabled.
+
+### Fused Attention Speedup
+
+The fused Triton attention kernel (online softmax, no KV materialization) vs. the engine's standard decompress-then-attend path:
+
+| KV Length | Engine (naive) | Fused Attention | Speedup |
+|-----------|---------------|-----------------|---------|
+| 64 | 0.40 ms | 0.20 ms | **2.0×** |
+| 256 | 1.06 ms | 0.24 ms | **4.4×** |
+| 1,024 | 3.71 ms | 0.50 ms | **7.4×** |
+| 4,096 | 14.65 ms | 1.55 ms | **9.4×** |
+
+Fused compression is also ~2× faster: 0.13 ms (fused) vs. 0.27 ms (standard) at seq_len=256.
+
+### WikiText-2 Perplexity — TinyLlama 1.1B (22 layers, head_dim=64)
+
+Baseline perplexity: **5.54** (2048 tokens, no compression)
+
+| Bits | Key Cosine | Value Cosine | Compression | Memory Saved |
+|------|-----------|-------------|-------------|--------------|
+| 2 | 0.8011 | 0.9411 | 6.40× | 84.4% |
+| 3 | 0.9411 | 0.9831 | 4.57× | 78.1% |
+| 4 | 0.9832 | 0.9954 | 3.56× | 71.9% |
+
+### WikiText-2 Perplexity — Mistral 7B (32 layers, head_dim=128)
+
+Baseline perplexity: **5.06** (4096 tokens, fp16, no compression)
+
+| Bits | Key Cosine | Value Cosine | Compression | Memory Saved |
+|------|-----------|-------------|-------------|--------------|
+| 2 | 0.7997 | 0.9403 | 7.11× | 85.9% |
+| 3 | 0.9404 | 0.9829 | 4.92× | 79.7% |
+| 4 | 0.9829 | 0.9953 | 3.76× | 73.4% |
+
+> 4-bit value cosine is 0.995+ on both models — near-lossless. Even at 2-bit, value cosine stays above 0.94. Quality is consistent across 22- and 32-layer models, confirming the theoretical guarantees scale with depth.
+
+### Run Benchmarks
 
 ```bash
+# Latency (GPU required, --triton-compare for head-to-head)
+python benchmarks/latency_bench.py --device cuda --triton-compare
+
+# Perplexity (downloads model + WikiText-2)
+python benchmarks/perplexity_eval.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --bits 2 3 4 --max-tokens 2048
+python benchmarks/perplexity_eval.py --model mistralai/Mistral-7B-v0.3 --bits 2 3 4 --max-tokens 4096 --dtype float16
+
 # Quality (MSE, cosine similarity, compression ratio)
 python -m benchmarks.quality_bench
-
-# Latency (compression, attention, search timing)
-python -m benchmarks.latency_bench
 
 # NN search (recall@k, indexing time, memory)
 python -m benchmarks.nn_search_bench
