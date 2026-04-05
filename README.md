@@ -222,22 +222,41 @@ Baseline perplexity: **5.06** (4096 tokens, fp16, no compression)
 
 ### End-to-End Generation — TinyLlama 1.1B (A100)
 
-Side-by-side text generation comparing standard (uncompressed) vs. 3-bit compressed KV cache:
+Side-by-side text generation comparing standard (uncompressed) vs. compressed KV cache:
 
-| Metric | Standard | 3-bit Compressed |
-|--------|----------|------------------|
-| Decode speed | 65 tok/s | 3.3 tok/s |
-| KV cache size | 2.4 MB | 0.5 MB |
-| Compression | 1.0× | **4.6×** |
-| Memory saved | — | **78%** |
+| Metric | Standard | 3-bit Compressed | 2-bit Compressed |
+|--------|----------|------------------|------------------|
+| Decode speed | 65 tok/s | 3.3 tok/s | 3.4 tok/s |
+| KV cache size | 2.4 MB | 0.5 MB | 0.4 MB |
+| Compression | 1.0× | **4.6×** | **6.4×** |
+| Memory saved | — | **78%** | **84%** |
 
-**Sample output** (prompt: *"In a small village nestled between mountains,"*):
+**3-bit sample** (prompt: *"In a small village nestled between mountains,"*):
 
 > **Standard:** *a young woman named Lily lives a simple life. She works as a cook in a local inn, and her days are filled with the sounds of birds chirping and the rustling of leaves in the wind…*
 >
 > **3-bit compressed:** *a young woman named Lily had a secret. She had been raised by her grandmother, who had been a kind and loving woman, but Lily had never known her mother…*
 
-Both outputs are fluent and coherent. Token divergence is expected — lossy compression perturbs the KV cache slightly, causing the autoregressive path to explore different (but equally valid) continuations. The compressed decode speed reflects per-token decompress→forward→recompress overhead; the fused Triton kernel eliminates decompression entirely for attention-bound workloads.
+3-bit outputs are fluent and coherent — the autoregressive path diverges but produces equally valid continuations. 2-bit (1-bit MSE + 1-bit QJL for keys) shows visible quality degradation with repetitive tokens, confirming that **3-bit is the practical sweet spot** for generation quality.
+
+### End-to-End Generation — Mistral 7B (A100)
+
+| Metric | Standard | 3-bit Compressed |
+|--------|----------|------------------|
+| Decode speed | 47 tok/s | 2.3 tok/s |
+| KV cache size | 13.8 MB | 2.8 MB |
+| Compression | 1.0× | **4.9×** |
+| Memory saved | — | **80%** |
+
+**Sample output** (prompt: *"The key insight behind transformer models is that"*):
+
+> **Standard:** *the order of words in a sentence doesn't matter as much as the relationships between words. This is a powerful idea, but it's also a bit of a double-edged sword…*
+>
+> **3-bit compressed:** *the order of words in a sentence doesn't matter as much as the relationships between words. This is a powerful idea, and it's the reason why transformer models can be trained on a relatively small amount of data…*
+
+**28% token match** on this prompt — the first 25 tokens are identical. Mistral 7B's larger head_dim (128 vs 64) means the compression noise is proportionally smaller, producing higher-quality compressed output than TinyLlama.
+
+The compressed decode speed reflects per-token decompress→forward→recompress overhead; the fused Triton kernel eliminates decompression entirely for attention-bound workloads (9.4× speedup benchmarked separately).
 
 ```bash
 # Run generation demo
