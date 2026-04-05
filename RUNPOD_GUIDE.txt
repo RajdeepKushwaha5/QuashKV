@@ -1,0 +1,111 @@
+================================================================
+  QuashKV — RunPod A100 Sprint Guide
+================================================================
+
+1. CREATE THE POD
+-----------------
+  - Go to runpod.io → GPU Cloud → Deploy
+  - Pick A100 80GB (or 40GB — both work)
+  - Template: RunPod PyTorch 2.x (comes with CUDA, PyTorch, Triton pre-installed)
+  - Disk: 50GB minimum (models download to disk)
+
+
+2. CONNECT TO THE POD
+---------------------
+  - On the pod page, scroll to "Web terminal"
+  - Click "Enable web terminal"
+  - Once enabled, click "Connect to Web Terminal"
+
+
+3. INSTALL QUASHKV
+------------------
+  Run these commands one at a time in the web terminal:
+
+    cd /workspace
+    git clone https://github.com/RajdeepKushwaha5/QuashKV.git
+    cd QuashKV
+    pip install -e ".[triton]"
+    pip install datasets transformers accelerate
+    pip install pytest
+
+
+4. VERIFY GPU + TRITON
+----------------------
+    python -c "import torch; import triton; from quashkv.triton_kernels import HAS_TRITON; print(f'CUDA: {torch.cuda.get_device_name(0)}'); print(f'Triton: {HAS_TRITON}')"
+
+  Expected output:
+    CUDA: NVIDIA A100-SXM4-80GB
+    Triton: True
+
+
+5. RUN TESTS
+-------------
+    python -m pytest tests/ -q --tb=short
+
+  Expected output:
+    175 passed
+
+
+6. RUN BENCHMARKS
+-----------------
+
+  Step A — Triton vs PyTorch speed comparison:
+
+    python benchmarks/latency_bench.py --device cuda --triton-compare
+
+  Step B — Perplexity quick sanity check (TinyLlama 1.1B):
+
+    python benchmarks/perplexity_eval.py \
+        --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+        --bits 2 3 4 \
+        --max-tokens 2048
+
+  Step C — Perplexity real test (Mistral 7B):
+
+    python benchmarks/perplexity_eval.py \
+        --model mistralai/Mistral-7B-v0.3 \
+        --bits 2 3 4 \
+        --max-tokens 4096 \
+        --dtype float16
+
+  OR just run the all-in-one script:
+
+    bash scripts/runpod_setup.sh
+
+
+7. WHAT YOU'LL GET
+------------------
+  Deliverable                                      Source
+  -----------------------------------------------  -----------------------------------
+  Triton kernel speedup vs PyTorch (3-8x expected) latency_bench.py --triton-compare
+  WikiText-2 baseline perplexity                   perplexity_eval.py
+  Per-layer key/value cosine similarity at 2/3/4b  perplexity_eval.py
+  Compression ratio + memory savings               perplexity_eval.py
+
+
+8. COST ESTIMATE
+----------------
+  - A100 80GB spot: ~$1.50/hr
+  - Full script takes ~15-20 min → under $0.50 total
+
+
+9. QUICK COPY-PASTE COMMANDS (after tests pass)
+------------------------------------------------
+  In the same RunPod web terminal, run these one at a time.
+  Wait for each command to finish before pasting the next.
+
+  Command 1 — Triton vs PyTorch latency:
+
+    python benchmarks/latency_bench.py --device cuda --triton-compare
+
+  Command 2 — TinyLlama perplexity (quick sanity check):
+
+    python benchmarks/perplexity_eval.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --bits 2 3 4 --max-tokens 2048
+
+  Command 3 — Mistral 7B perplexity (the real test):
+
+    python benchmarks/perplexity_eval.py --model mistralai/Mistral-7B-v0.3 --bits 2 3 4 --max-tokens 4096 --dtype float16
+
+  Copy the output from each command for the README.
+
+================================================================

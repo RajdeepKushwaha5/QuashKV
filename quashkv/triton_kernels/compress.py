@@ -140,7 +140,6 @@ if HAS_TRITON:
 
         # 4. Boundary quantization via linear scan
         #    For small n_bounds (<=15 for 4-bit), this is efficient
-        bounds = tl.load(bounds_ptr + tl.arange(0, n_bounds))
         indices = tl.zeros([d], dtype=tl.int32)
         for b_idx in tl.static_range(n_bounds):
             bound_val = tl.load(bounds_ptr + b_idx)
