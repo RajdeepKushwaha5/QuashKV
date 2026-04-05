@@ -31,6 +31,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from quashkv.engine import QuashKVEngine
+from quashkv.integrations.hf_cache import QuashKVCache, QuashKVCacheConfig
 from quashkv.triton_kernels import HAS_TRITON
 
 
@@ -52,6 +53,8 @@ def parse_args():
     p.add_argument("--device", default=None,
                    help="Device (default: cuda if available, else cpu)")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--compressed-ppl", action="store_true",
+                   help="Measure actual perplexity with compressed KV cache")
     return p.parse_args()
 
 
@@ -199,6 +202,143 @@ def evaluate_kv_quality(model, input_ids, bits, seed, max_length, device):
 
 
 # ======================================================================
+# Robust KV extraction (transformers 4.x / 5.x compatible)
+# ======================================================================
+
+def _extract_kv_pairs(past_key_values, num_layers):
+    """Extract list of (key, value) tensors from model's past_key_values.
+
+    Works with DynamicCache (4.36+), transformers 5.x, and legacy tuples.
+    """
+    # Method 1: key_cache / value_cache lists (transformers 4.36-4.x)
+    if hasattr(past_key_values, "key_cache") and hasattr(past_key_values, "value_cache"):
+        kc = past_key_values.key_cache
+        vc = past_key_values.value_cache
+        if isinstance(kc, list) and len(kc) > 0:
+            return [(kc[i], vc[i]) for i in range(num_layers)]
+
+    # Method 2: to_legacy_cache()
+    if hasattr(past_key_values, "to_legacy_cache"):
+        legacy = past_key_values.to_legacy_cache()
+        return [(legacy[i][0], legacy[i][1]) for i in range(num_layers)]
+
+    # Method 3: iteration
+    try:
+        pairs = []
+        for item in past_key_values:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                pairs.append((item[0], item[1]))
+            else:
+                k, v = item
+                pairs.append((k, v))
+        if len(pairs) == num_layers:
+            return pairs
+    except (TypeError, ValueError):
+        pass
+
+    # Method 4: direct subscript
+    try:
+        return [(past_key_values[i][0], past_key_values[i][1])
+                for i in range(num_layers)]
+    except (TypeError, KeyError, IndexError):
+        pass
+
+    raise RuntimeError(
+        f"Cannot extract KV pairs from {type(past_key_values).__name__}. "
+        f"Attrs: {[a for a in dir(past_key_values) if not a.startswith('__')]}"
+    )
+
+
+# ======================================================================
+# Compressed perplexity
+# ======================================================================
+
+@torch.no_grad()
+def compressed_perplexity(model, input_ids, bits, seed, max_length, stride, device):
+    """Measure perplexity with compressed KV cache.
+
+    For each sliding window, the prefix (context) KV cache is compressed
+    and decompressed before evaluating the loss on the remaining tokens.
+    This measures the actual impact of KV compression on model quality.
+    """
+    from transformers import DynamicCache
+
+    seq_len = input_ids.size(1)
+    num_layers = model.config.num_hidden_layers
+    head_dim = getattr(model.config, "head_dim", None)
+    if head_dim is None:
+        head_dim = model.config.hidden_size // model.config.num_attention_heads
+    model_dtype = next(model.parameters()).dtype
+
+    total_nll = 0.0
+    total_tokens = 0
+    prev_end = 0
+
+    for begin in range(0, seq_len, stride):
+        end = min(begin + max_length, seq_len)
+        chunk = input_ids[:, begin:end].to(device)
+        trg_len = end - prev_end    # tokens to evaluate (matches baseline)
+        ctx_len = chunk.size(1) - trg_len  # context tokens (to compress)
+
+        if ctx_len <= 0:
+            # No context to compress — use normal forward (matches baseline)
+            target = chunk.clone()
+            loss = model(chunk, labels=target).loss
+            n = (target != -100).sum().item()
+            total_nll += loss.item() * n
+            total_tokens += n
+        else:
+            # Step 1: forward on prefix to get KV cache
+            prefix = chunk[:, :ctx_len]
+            eval_tokens = chunk[:, ctx_len:]
+
+            prefix_out = model(prefix, use_cache=True)
+            kv_pairs = _extract_kv_pairs(prefix_out.past_key_values, num_layers)
+            del prefix_out
+
+            # Step 2: compress and decompress KV
+            config = QuashKVCacheConfig(key_bits=bits, value_bits=bits, seed=seed)
+            cache = QuashKVCache(
+                num_layers=num_layers, head_dim=head_dim,
+                config=config, device=str(device),
+            )
+            for layer_idx, (k, v) in enumerate(kv_pairs):
+                cache.update(k.float(), v.float(), layer_idx=layer_idx)
+            del kv_pairs
+
+            # Step 3: build real DynamicCache from decompressed KV
+            hf_cache = DynamicCache()
+            for layer_idx in range(num_layers):
+                k_dec, v_dec = cache[layer_idx]
+                hf_cache.update(
+                    k_dec.to(model_dtype), v_dec.to(model_dtype), layer_idx
+                )
+            del cache
+
+            # Step 4: forward eval tokens with compressed cache
+            labels = eval_tokens.clone()
+            outputs = model(
+                eval_tokens, past_key_values=hf_cache, labels=labels
+            )
+            n = (labels != -100).sum().item()
+            total_nll += outputs.loss.item() * n
+            total_tokens += n
+
+            del hf_cache, outputs
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        prev_end = end
+        if end == seq_len:
+            break
+
+    if total_tokens == 0:
+        return float("inf")
+    return math.exp(total_nll / total_tokens)
+
+
+# ======================================================================
 # Printing
 # ======================================================================
 
@@ -258,11 +398,18 @@ def main():
     print("  Loading model & tokenizer...")
     t0 = time.time()
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        torch_dtype=dtype_map[args.dtype],
-        device_map=args.device,
-    )
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            dtype=dtype_map[args.dtype],
+            device_map=args.device,
+        )
+    except TypeError:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype=dtype_map[args.dtype],
+            device_map=args.device,
+        )
     model.eval()
     print(f"  Loaded in {time.time() - t0:.1f}s")
 
@@ -300,6 +447,32 @@ def main():
         if results:
             print_quality_table(results, bits, head_dim)
             print(f"  Eval time: {time.time() - t0:.1f}s")
+
+    # ---- 3. Compressed perplexity (optional) ----
+    if args.compressed_ppl:
+        print(f"\n{'=' * 65}")
+        print("  Compressed Perplexity (KV cache compressed per window)")
+        print(f"{'=' * 65}")
+        for bits in args.bits:
+            t0 = time.time()
+            try:
+                cppl = compressed_perplexity(
+                    model, input_ids,
+                    bits=bits,
+                    seed=args.seed,
+                    max_length=max_len,
+                    stride=args.stride,
+                    device=args.device,
+                )
+                elapsed = time.time() - t0
+                delta = cppl - ppl
+                print(f"  {bits}-bit:  {cppl:.2f}  "
+                      f"(Δ = +{delta:.2f} vs baseline {ppl:.2f})  "
+                      f"({elapsed:.1f}s)")
+            except Exception as e:
+                print(f"  {bits}-bit:  ERROR — {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
 
     print(f"\n{'=' * 65}")
     print("  Done!")
