@@ -360,8 +360,12 @@ def fused_quantized_attention(
 
         O = torch.zeros(B, H, Q, D, dtype=torch.float32, device=queries.device)
 
-        BLOCK_Q = max(16, triton.next_power_of_2(min(Q, 64)))
-        BLOCK_KV = max(16, triton.next_power_of_2(min(KV, 64)))
+        # Tile sizes — must be power of 2 and >= 16 for tl.dot.
+        # The kernel loads the full D×D Pi matrix into SRAM, so for
+        # large D (≥128) we must use small KV tiles to stay within
+        # the A100's 163 KB shared-memory limit.
+        BLOCK_Q = 16
+        BLOCK_KV = 16 if D >= 128 else max(16, triton.next_power_of_2(min(KV, 64)))
 
         grid = (triton.cdiv(Q, BLOCK_Q) * B * H,)
 
@@ -380,6 +384,7 @@ def fused_quantized_attention(
             BLOCK_Q=BLOCK_Q, BLOCK_KV=BLOCK_KV,
             N_KEY_CENTS=kcents.shape[0], N_VAL_CENTS=vcents.shape[0],
             scale=scale, qjl_scale=qjl_scale,
+            num_stages=1,
         )
         return O
 
