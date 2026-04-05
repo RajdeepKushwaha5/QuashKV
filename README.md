@@ -142,6 +142,45 @@ From the TurboQuant paper (Zandieh et al., ICLR 2026):
 
 The inner product estimator is **unbiased**: $E[\langle y, \tilde{x} \rangle] = \langle y, x \rangle$.
 
+## Real-Model Validation
+
+Validated on real LLM KV caches using a Tesla T4 GPU (Kaggle). Both models use head_dim=64.
+
+### 3-bit Compression (Key: IP Quantizer, Value: MSE Quantizer)
+
+| Model | Layers | KV Heads | Key Cosine | Value Cosine | Attention Cosine |
+|-------|--------|----------|-----------|-------------|-----------------|
+| Qwen/Qwen2.5-0.5B | 24 | 2 (GQA) | 0.9409 | 0.9838 | 0.8869 |
+| TinyLlama/TinyLlama-1.1B-Chat-v1.0 | 22 | 4 (GQA) | 0.9420 | 0.9836 | 0.9237 |
+
+### Bit-Width Sweep
+
+| Bits | Key Cosine (Qwen / TinyLlama) | Value Cosine (Qwen / TinyLlama) | Compression |
+|------|-------------------------------|--------------------------------|-------------|
+| 2-bit | 0.7988 / 0.8011 | 0.9421 / 0.9417 | 8.0x |
+| 3-bit | 0.9409 / 0.9420 | 0.9838 / 0.9836 | 5.3x |
+| 4-bit | 0.9835 / 0.9837 | 0.9956 / 0.9956 | 4.0x |
+
+### Memory Savings (3-bit, packed)
+
+| Metric | Value |
+|--------|-------|
+| Compression ratio | 4.57x |
+| Memory saved | 78.1% |
+
+### Long-Sequence Stability (TinyLlama 1.1B)
+
+| Sequence Length | Key Cosine | Value Cosine | Original | Compressed |
+|----------------|-----------|-------------|----------|------------|
+| 122 tokens | 0.9420 | 0.9836 | 2.6 MB | 0.6 MB |
+| 1,040 tokens | 0.9420 | 0.9835 | 22.3 MB | 5.0 MB |
+
+Quality is **perfectly stable** — identical cosine similarity at 8.5x longer sequences. Compression ratio holds at 4.57x regardless of sequence length.
+
+> Key cosine similarity (not raw MSE) is the correct quality metric for keys because the IP quantizer preserves direction. Value MSE stays well within the theoretical bound (0.002 vs 0.035).
+
+See [`notebooks/kaggle_validation.ipynb`](notebooks/kaggle_validation.ipynb) for the full reproducible notebook.
+
 ## Benchmarks
 
 Run the included benchmarks:
@@ -165,7 +204,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-154+ tests covering all modules: codebook, quantizer, engine, packing, HF cache, vLLM backend, NN search, Triton fallbacks, mixed precision, and end-to-end integration.
+175 tests covering all modules: codebook, quantizer, engine, packing, HF cache, vLLM backend, NN search, Triton fallbacks, mixed precision, and end-to-end integration.
 
 ## Comparison with Related Work
 
