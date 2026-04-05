@@ -296,16 +296,92 @@ pytest
 
 ## Comparison with Related Work
 
+### Feature Matrix
+
 | Aspect | QuashKV | Anirudh's cuTile impl | KIVI | PolarQuant |
 |--------|---------|----------------------|------|------------|
 | Hardware | Any GPU (A100/H100/4090) | B200 only | Any | Any |
 | Kernel framework | PyTorch + Triton kernels | cuTile (Blackwell-locked) | PyTorch | PyTorch |
-| End-to-end generation | ✅ Side-by-side demo | ✅ Llama 3 demo | ❌ | ❌ |
-| Vector search | Full NN search module | Not implemented | N/A | N/A |
-| Outlier handling | Mixed-precision adaptive | Not implemented | Per-channel | None |
+| End-to-end generation | ✅ Side-by-side demo | ✅ Qwen 2.5 demo | ❌ | ❌ |
+| Compressed perplexity eval | ✅ WikiText-2 (2 models) | ❌ | ❌ | ❌ |
+| Vector search | Full NN search module | ❌ | N/A | N/A |
+| Outlier handling | Mixed-precision adaptive | ❌ | Per-channel | None |
 | Serving integration | vLLM + HuggingFace | Standalone notebook | HuggingFace | HuggingFace |
 | Theoretical guarantees | Full paper bounds verified | Partial | None | None |
 | Bit-width configs | 2, 2.5, 3, 3.5, 4-bit | 3-bit only | 2-bit | 4-bit |
+| Multi-model validation | TinyLlama, Mistral 7B | Qwen 2.5-1.5B only | Llama | Llama |
+| Test coverage | 175 tests | ~5 tests | Minimal | Minimal |
+| Lines of code | ~4,090 | ~2,000 | — | — |
+
+### Where cuTile Is Stronger (and why)
+
+**Raw kernel performance.** Anirudh's fused attention kernel runs on NVIDIA B200 with cuTile — a Blackwell-native DSL that compiles directly to Tensor Core instructions, hardware TMA (Tensor Memory Accelerator) prefetch, and TMEM→MMA paths that don't exist on older architectures. His generation demo hits **144.7 tok/s** on B200 vs our 47 tok/s on A100 for a comparable model size. This isn't close.
+
+Specific Blackwell advantages cuTile exploits that we can't touch:
+- **Hardware TMA prefetch** with latency hints (`latency=2`, `latency=4`) — overlaps memory loads with Tensor Core compute at the hardware level
+- **Block swizzling** for L2 cache line optimization (~6% latency reduction at 16K tokens)
+- **Native exp2 with flush-to-zero** — Blackwell's fast-path softmax in hardware
+- **Approximate division** with `rounding_mode=APPROX` — hardware reciprocal instead of software division
+- **Pi matrix resident in shared memory** (32KB) — stays loaded for the entire fused attention pass, zero reloads
+
+These are real hardware-level wins that Triton on Ampere/Hopper simply cannot replicate. cuTile generates code that's purpose-built for Blackwell's memory hierarchy.
+
+**On-chip V decompression.** His fused kernel decompresses value indices → centroids → un-rotates via Pi → weighted accumulation in a single pass without ever writing decompressed values to HBM. Our Triton fused attention kernel operates on compressed KV directly and avoids the decompress round-trip, but we don't have the same level of on-chip data reuse because Triton's programming model is more constrained than cuTile's explicit tile-level control.
+
+### Where QuashKV Is Stronger (and why)
+
+**1. Portability.** cuTile is locked to Blackwell (B200/B100). QuashKV runs on any GPU with Triton support — A100, H100, L40S, RTX 4090, even older V100s for the PyTorch fallback path. This matters because:
+- Most researchers and startups don't have B200 access
+- Most cloud GPU instances are still A100/H100
+- Reproducibility requires hardware accessibility
+
+**2. Completeness of the paper.** We implement *every* component from the TurboQuant paper:
+- MSE quantizer (Algorithm 1) ✅
+- Inner product quantizer with QJL (Algorithm 2) ✅
+- Mixed-precision / outlier channel splitting (Section 4.2) ✅
+- Approximate nearest neighbor search (Section 5) ✅
+- Full theoretical bound verification ✅
+
+cuTile implements the core compress/decompress/attention pipeline (which is the most important part) but doesn't cover NN search, mixed precision, or multi-bitwidth configurations.
+
+**3. Compressed perplexity — the metric that actually matters.** Cosine similarity (cuTile reports ~0.985) tells you reconstruction quality, but it doesn't tell you whether the model's output is degraded. We measured actual WikiText-2 perplexity with compressed KV cache:
+- Mistral 7B 3-bit: **+0.04 perplexity** (5.06 → 5.10) — effectively lossless
+- TinyLlama 3-bit: **+0.12 perplexity** (6.97 → 7.09)
+- Mistral 7B 4-bit: **+0.01 perplexity** — indistinguishable from baseline
+
+No other TurboQuant implementation has published compressed perplexity numbers. This is the strongest evidence that the theoretical guarantees translate to real model quality.
+
+**4. Multi-model validation.** cuTile tested on Qwen 2.5-1.5B only. We validated on two architecturally different models (TinyLlama head_dim=64, Mistral 7B head_dim=128), which revealed that **2-bit quality depends heavily on head_dim** — a finding you can't discover from a single model.
+
+**5. Production integration.** QuashKV provides drop-in replacements for HuggingFace's `DynamicCache` and a vLLM attention backend. cuTile's demo is a standalone notebook. If you want to actually deploy compressed KV in a serving pipeline, QuashKV is plug-and-play.
+
+**6. Flexible bit-widths.** 2, 2.5, 3, 3.5, and 4-bit configurations, with per-channel mixed precision that allocates extra bits to outlier channels. cuTile is hardcoded to 3-bit (2-bit MSE + 1-bit QJL for keys, 3-bit MSE for values).
+
+**7. Test coverage.** 175 tests covering every module end-to-end. This isn't about vanity — it means any researcher can fork the repo, change something, and know immediately if they broke the math.
+
+### Where We're Honest About Limitations
+
+**1. Decode speed.** Our compressed generation runs at 2.3–3.4 tok/s (decompress → forward → recompress per token) vs 47–65 tok/s uncompressed. cuTile's fused kernel avoids this by operating directly on compressed data during generation. Our fused Triton attention kernel (benchmarked at 9.4× speedup) isn't yet wired into the generation loop — it's benchmarked standalone. **This is our biggest gap.**
+
+**2. Kernel throughput.** Triton generates good GPU code, but it can't match cuTile's Blackwell-specific optimizations. On equivalent hardware, cuTile would be faster for the core attention+decompress path. We trade peak performance for portability.
+
+**3. Scale.** We validated on TinyLlama 1.1B and Mistral 7B. cuTile's Qwen 2.5-1.5B is comparable in size. Neither implementation has been tested on truly large models (70B+, MoE architectures) where per-layer error accumulation across 80+ layers is the real challenge.
+
+**4. No benchmark on matching hardware.** We can't do an apples-to-apples latency comparison because we don't have B200 access. Our A100 numbers and their B200 numbers measure different things.
+
+### Why We Built This
+
+**The short answer:** Anirudh built the right thing on hardware nobody has. We built the version anyone can use.
+
+TurboQuant is a beautiful paper — near-optimal vector quantization with provable guarantees, elegant math (random rotation → independent coordinates → Lloyd-Max is optimal), and practical KV cache compression. When we saw Anirudh's implementation, three things stood out:
+
+1. **B200-only is a dealbreaker for most people.** The paper's algorithms are hardware-agnostic. The math works on any GPU — why should the implementation be locked to one chip that costs $30K+ and has limited cloud availability?
+
+2. **The paper has more to offer than KV compression.** TurboQuant's NN search application (180,000× faster indexing than Product Quantization) and mixed-precision adaptive quantization are significant contributions that deserved implementation.
+
+3. **Benchmarks need to go deeper.** Cosine similarity and generation demos are great proof-of-concepts, but the research community needs **compressed perplexity** — the actual metric that determines whether you'd deploy this in production. We measured it, and the results (+0.04 PPL at 3-bit on 7B) are strong enough to publish.
+
+The implementations are complementary. If you have a B200 and want maximum throughput, use cuTile. If you want to understand, experiment with, or deploy TurboQuant on accessible hardware, use QuashKV.
 
 ## API Reference
 

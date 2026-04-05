@@ -84,21 +84,35 @@ The first 25 tokens are **identical**. Compression noise causes the autoregressi
 
 ## How It Compares to cuTile
 
-The other known implementation is Anirudh's cuTile version using NVIDIA's Blackwell-specific cuTile framework.
+The other known implementation is [Anirudh's cuTile version](https://github.com/DevTechJr/turboquant_cutile) — built on NVIDIA's Blackwell-specific cuTile framework, targeting the B200 GPU.
 
-| Aspect | QuashKV | cuTile impl |
-|--------|---------|------------|
-| **Hardware** | Any GPU (A100/H100/4090) | B200 only |
-| **Kernel framework** | PyTorch + Triton | cuTile (Blackwell-locked) |
-| **Multi-model validation** | TinyLlama, Mistral 7B | Llama 3 only |
-| **End-to-end generation** | ✅ | ✅ |
-| **Vector search** | Full NN search module | ❌ |
-| **Mixed precision** | Per-channel adaptive | ❌ |
-| **Serving integration** | vLLM + HuggingFace | Standalone |
-| **Bit-width configs** | 2, 2.5, 3, 3.5, 4-bit | 3-bit only |
-| **Test coverage** | 175 tests | Minimal |
+### Where cuTile wins
 
-QuashKV trades raw kernel speed (Triton vs cuTile) for **portability and completeness**. It runs on any GPU from the last 3 generations and includes everything needed for production deployment.
+**Raw speed.** cuTile compiles to Blackwell Tensor Core instructions with hardware TMA prefetch, block swizzling, native exp2 fast-paths, and Pi-matrix resident in shared memory. His fused attention kernel hits **144.7 tok/s** on B200 vs our 47 tok/s on A100. The hardware gap is real — cuTile exploits Blackwell memory hierarchy features (TMEM→MMA, approximate reciprocal) that Triton on Ampere simply can't access.
+
+**On-chip V decompression.** His fused kernel decompresses values entirely in SRAM — indices → centroids → un-rotate via Pi → weighted sum, never touching HBM. That's the theoretical ideal for bandwidth-bound attention.
+
+### Where QuashKV wins
+
+**Portability.** Runs on A100, H100, L40S, RTX 4090 — any GPU with Triton support. Most researchers and cloud instances don't have B200 access. The paper's math is hardware-agnostic; the implementation should be too.
+
+**Compressed perplexity — the metric that matters.** cuTile reports ~0.985 cosine similarity, but cosine doesn't tell you if the model's output quality degrades. We measured actual WikiText-2 perplexity with compressed KV: Mistral 7B 3-bit adds only **+0.04 perplexity** while saving 80% memory. No other implementation has published this number.
+
+**Paper completeness.** We implement every component: MSE quantizer, IP quantizer with QJL, mixed-precision outlier handling, NN search (180,000× faster indexing than PQ), and flexible 2/2.5/3/3.5/4-bit configs. cuTile covers the core pipeline at 3-bit only.
+
+**Production integration.** Drop-in `DynamicCache` replacement for HuggingFace + vLLM attention backend vs. standalone notebook.
+
+**Multi-model validation.** Tested on TinyLlama (head_dim=64) and Mistral 7B (head_dim=128), revealing that 2-bit quality depends heavily on head_dim — invisible from a single-model test.
+
+### Honest limitations
+
+**Our decode speed is slow** — 2.3–3.4 tok/s with per-token decompress→forward→recompress. The fused Triton kernel (9.4× speedup) isn't yet wired into the generation loop. This is our biggest gap.
+
+**We can't benchmark on matching hardware.** A100 vs B200 numbers measure different things.
+
+### Why build it?
+
+Anirudh built the right thing on hardware nobody has. We built the version anyone can use. The implementations are complementary — B200 + max throughput → cuTile; accessible hardware + experiments + deployment → QuashKV.
 
 ## Architecture
 
