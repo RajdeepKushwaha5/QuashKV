@@ -200,13 +200,15 @@ Fused compression is also ~2× faster: 0.13 ms (fused) vs. 0.27 ms (standard) at
 
 ### WikiText-2 Perplexity — TinyLlama 1.1B (22 layers, head_dim=64)
 
-Baseline perplexity: **5.54** (2048 tokens, no compression)
+Baseline perplexity: **6.97** (4096 tokens, sliding window, no compression)
 
-| Bits | Key Cosine | Value Cosine | Compression | Memory Saved |
-|------|-----------|-------------|-------------|--------------|
-| 2 | 0.8011 | 0.9411 | 6.40× | 84.4% |
-| 3 | 0.9411 | 0.9831 | 4.57× | 78.1% |
-| 4 | 0.9832 | 0.9954 | 3.56× | 71.9% |
+| Bits | Key Cosine | Value Cosine | Compressed PPL | Δ PPL | Compression | Memory Saved |
+|------|-----------|-------------|---------------|-------|-------------|--------------|
+| 2 | 0.8011 | 0.9411 | 31.56 | +24.59 | 6.40× | 84.4% |
+| 3 | 0.9411 | 0.9831 | **7.09** | **+0.12** | 4.57× | 78.1% |
+| 4 | 0.9832 | 0.9954 | **6.97** | **+0.00** | 3.56× | 71.9% |
+
+> 2-bit degrades badly on TinyLlama (head_dim=64) because each coordinate carries more information. With Mistral 7B (head_dim=128), 2-bit is far more usable — see below.
 
 ### WikiText-2 Perplexity — Mistral 7B (32 layers, head_dim=128)
 

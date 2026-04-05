@@ -182,12 +182,29 @@
 
   Command 7 — TinyLlama compressed perplexity (~2 min):
 
-    python benchmarks/perplexity_eval.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --bits 2 3 4 --max-tokens 2048 --compressed-ppl
+    python benchmarks/perplexity_eval.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --bits 2 3 4 --max-tokens 4096 --compressed-ppl
 
   Command 8 — Mistral 7B compressed perplexity (~5-10 min):
 
     python benchmarks/perplexity_eval.py --model mistralai/Mistral-7B-v0.3 --bits 2 3 4 --max-tokens 4096 --dtype float16 --compressed-ppl
 
   Copy the FULL output from both commands and paste it back.
+
+
+12. TINYLLAMA COMPRESSED PERPLEXITY FIX (fresh pod)
+-----------------------------------------------------
+  One-shot setup + run. Paste this whole block:
+
+  STEP 1 — Setup (paste all at once):
+
+    cd /workspace && git clone https://github.com/RajdeepKushwaha5/QuashKV.git && cd QuashKV && pip install -e ".[triton]" && pip install datasets transformers accelerate
+
+  STEP 2 — Run TinyLlama compressed perplexity:
+
+    python benchmarks/perplexity_eval.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --bits 2 3 4 --max-tokens 4096 --compressed-ppl
+
+  STEP 3 — Copy the FULL output and paste it back.
+
+  STEP 4 — Terminate the pod.
 
 ================================================================

@@ -40,37 +40,21 @@ The fused Triton kernel reads compressed KV directly — no decompression step:
 
 ### WikiText-2 Perplexity
 
-Baseline: TinyLlama 1.1B = **5.54**, Mistral 7B = **5.06**
+**TinyLlama 1.1B** (baseline: 6.97):
+| Bits | Compressed PPL | Δ PPL | Compression | Memory Saved |
+|------|---------------|-------|-------------|-------------|
+| 2 | 31.56 | +24.59 | 6.40× | 84.4% |
+| 3 | **7.09** | **+0.12** | 4.57× | 78.1% |
+| 4 | **6.97** | **+0.00** | 3.56× | 71.9% |
 
-**TinyLlama 1.1B:**
-| Bits | Key Cosine | Value Cosine | Compression | Memory Saved |
-|------|-----------|-------------|-------------|-------------|
-| 2 | 0.8011 | 0.9411 | 6.40× | 84.4% |
-| 3 | 0.9411 | 0.9831 | 4.57× | 78.1% |
-| 4 | 0.9832 | 0.9954 | 3.56× | 71.9% |
+**Mistral 7B** (baseline: 5.06):
+| Bits | Compressed PPL | Δ PPL | Compression | Memory Saved |
+|------|---------------|-------|-------------|-------------|
+| 2 | 5.88 | +0.82 | 7.11× | 85.9% |
+| 3 | **5.10** | **+0.04** | 4.92× | 79.7% |
+| 4 | **5.07** | **+0.01** | 3.76× | 73.4% |
 
-**Mistral 7B:**
-| Bits | Key Cosine | Value Cosine | Compression | Memory Saved |
-|------|-----------|-------------|-------------|-------------|
-| 2 | 0.7997 | 0.9403 | 7.11× | 85.9% |
-| 3 | 0.9404 | 0.9829 | 4.92× | 79.7% |
-| 4 | 0.9829 | 0.9953 | 3.76× | 73.4% |
-
-4-bit value cosine is **0.995+** on both models — near-lossless.
-
-### Compressed Perplexity — The Definitive Test
-
-KV quality metrics (cosine similarity) are necessary but not sufficient. The real question: **does compression hurt actual model output quality?**
-
-We measured WikiText-2 perplexity with compressed KV cache on Mistral 7B (baseline: 5.06):
-
-| Bits | Compressed Perplexity | Δ vs Baseline | Compression | Memory Saved |
-|------|----------------------|---------------|-------------|-------------|
-| 2-bit | 5.88 | +0.82 | 7.11× | 85.9% |
-| **3-bit** | **5.10** | **+0.04** | **4.92×** | **79.7%** |
-| 4-bit | 5.07 | +0.01 | 3.76× | 73.4% |
-
-**3-bit compression adds only +0.04 perplexity while saving 80% memory.** 4-bit is effectively indistinguishable from baseline. This is the strongest evidence that TurboQuant's theoretical guarantees translate to real model quality.
+**3-bit adds only +0.04 perplexity on Mistral 7B while saving 80% memory.** 4-bit is effectively indistinguishable from baseline. Note: 2-bit degrades badly on TinyLlama (head_dim=64) but works well on Mistral 7B (head_dim=128) — larger dimensions tolerate aggressive quantization better.
 
 ### End-to-End Generation
 
