@@ -120,4 +120,53 @@
 
   Copy the output from each command for the README.
 
+
+10. GENERATION DEMO SPRINT (new RunPod session)
+-------------------------------------------------
+  If you already ran Commands 1-3 and deleted the pod, here's the
+  fresh setup for the generation demo only.
+
+  STEP 1 — Create a new RunPod pod:
+    - runpod.io → GPU Cloud → Deploy
+    - Pick: A100 80GB (or 40GB)
+    - Template: RunPod PyTorch 2.x
+    - Disk: 50GB
+    - Click Deploy
+
+  STEP 2 — Connect via web terminal:
+    - Click "Connect to Web Terminal" once the pod is ready
+
+  STEP 3 — One-shot setup (paste this whole block):
+
+    cd /workspace && git clone https://github.com/RajdeepKushwaha5/QuashKV.git && cd QuashKV && pip install -e ".[triton]" && pip install datasets transformers accelerate pytest && python -c "import torch; from quashkv.triton_kernels import HAS_TRITON; print(f'GPU: {torch.cuda.get_device_name(0)}'); print(f'Triton: {HAS_TRITON}')"
+
+  Expected:
+    GPU: NVIDIA A100-SXM4-80GB
+    Triton: True
+
+  STEP 4 — Run tests (quick sanity check):
+
+    python -m pytest tests/ -q --tb=short
+
+  Expected: 175 passed
+
+  STEP 5 — TinyLlama generation demo (3-bit, ~2 min):
+
+    python benchmarks/generation_demo.py
+
+  STEP 6 — TinyLlama generation demo (2-bit aggressive, ~2 min):
+
+    python benchmarks/generation_demo.py --bits 2
+
+  STEP 7 — Mistral 7B generation demo (3-bit, ~5 min):
+
+    python benchmarks/generation_demo.py --model mistralai/Mistral-7B-v0.3 --dtype float16
+
+  STEP 8 — Copy ALL output from Steps 5-7 and paste it back to me.
+           I'll update the README with the results and we'll push.
+
+  STEP 9 — Terminate the pod when done (saves money).
+
+  Total time: ~15 min.  Cost: ~$0.40.
+
 ================================================================
