@@ -211,7 +211,7 @@ pytest
 | Aspect | QuashKV | Anirudh's cuTile impl | KIVI | PolarQuant |
 |--------|---------|----------------------|------|------------|
 | Hardware | Any GPU (A100/H100/4090) | B200 only | Any | Any |
-| Kernel framework | Triton (portable) | cuTile (Blackwell-locked) | PyTorch | PyTorch |
+| Kernel framework | PyTorch + Triton stubs | cuTile (Blackwell-locked) | PyTorch | PyTorch |
 | Vector search | Full NN search module | Not implemented | N/A | N/A |
 | Outlier handling | Mixed-precision adaptive | Not implemented | Per-channel | None |
 | Serving integration | vLLM + HuggingFace | Standalone notebook | HuggingFace | HuggingFace |
