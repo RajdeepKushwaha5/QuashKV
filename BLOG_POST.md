@@ -1,6 +1,6 @@
 # I Implemented the Full TurboQuant Paper on Commodity GPUs
 
-**TL;DR:** I built [QuashKV](https://github.com/RajdeepKushwaha5/QuashKV) — a complete, portable implementation of TurboQuant (ICLR 2026, Google Research) that compresses LLM KV caches to 2–4 bits with mathematically proven near-optimal distortion. It runs on any GPU (A100, H100, 4090), includes fused Triton kernels, NN search, mixed precision, and HuggingFace/vLLM integration. Validated on TinyLlama 1.1B and Mistral 7B with real perplexity and generation benchmarks.
+**TL;DR:** I built [QuashKV](https://github.com/RajdeepKushwaha5/QuashKV) — a complete, portable implementation of TurboQuant (ICLR 2026, Google Research) that compresses LLM KV caches to 2–4 bits with mathematically proven near-optimal distortion. It runs on any GPU (A100, H100, 4090), includes fused Triton kernels, NN search, mixed precision, and HuggingFace integration. Validated on TinyLlama 1.1B and Mistral 7B with real perplexity and generation benchmarks.
 
 ---
 
@@ -23,7 +23,7 @@ I built **QuashKV**, a complete implementation that makes these guarantees real 
 | **Mixed precision** | Per-channel adaptive bit allocation (outlier channels get more bits) |
 | **NN search** | Zero-training approximate MIPS with 180,000× faster indexing than PQ |
 | **HuggingFace cache** | Drop-in `DynamicCache` replacement |
-| **vLLM backend** | `QuashKVModelManager` for production serving |
+| **vLLM backend** | `QuashKVModelManager` architectural scaffolding (not yet registered) |
 
 ## Benchmark Results (A100-SXM4-80GB)
 
@@ -100,7 +100,7 @@ The other known implementation is [Anirudh's cuTile version](https://github.com/
 
 **Paper completeness.** We implement every component: MSE quantizer, IP quantizer with QJL, mixed-precision outlier handling, NN search (180,000× faster indexing than PQ), and flexible 2/2.5/3/3.5/4-bit configs. cuTile covers the core pipeline at 3-bit only.
 
-**Production integration.** Drop-in `DynamicCache` replacement for HuggingFace + vLLM attention backend vs. standalone notebook.
+**Production integration.** Drop-in `DynamicCache` replacement for HuggingFace. vLLM backend is architecturally implemented but not yet registered — cuTile's demo is a standalone notebook.
 
 **Multi-model validation.** Tested on TinyLlama (head_dim=64) and Mistral 7B (head_dim=128), revealing that 2-bit quality depends heavily on head_dim — invisible from a single-model test.
 
@@ -125,7 +125,7 @@ quashkv/
 ├── mixed_precision.py   # Per-channel adaptive bit allocation
 ├── integrations/
 │   ├── hf_cache.py      # HuggingFace DynamicCache replacement
-│   └── vllm_backend.py  # vLLM attention backend
+│   └── vllm_backend.py  # vLLM backend scaffolding (not yet registered)
 ├── nn_search/
 │   └── index.py         # QuashIndex for vector search
 └── triton_kernels/
@@ -134,7 +134,7 @@ quashkv/
     └── attention.py     # Online-softmax quantized attention
 ```
 
-16 source files, 4,090 lines of code, 175 tests.
+16 source files, ~3,280 lines of code, 175 tests.
 
 ## Theoretical Guarantees (Verified)
 

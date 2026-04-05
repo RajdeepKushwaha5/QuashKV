@@ -6,7 +6,7 @@ QuashKV compresses high-dimensional vectors (LLM key/value caches, embedding dat
 
 - **4–5× KV cache compression** with minimal quality loss
 - **Zero-training vector search** (180,000× faster indexing than Product Quantization)
-- **Drop-in HuggingFace and vLLM integration**
+- **Drop-in HuggingFace integration** (vLLM scaffolding included)
 
 ## Key Features
 
@@ -19,7 +19,7 @@ QuashKV compresses high-dimensional vectors (LLM key/value caches, embedding dat
 | Mixed precision | Per-channel adaptive bit allocation (outlier channels get more bits) |
 | Fused kernels | PyTorch fallbacks + Triton GPU kernels (compress, decompress, fused attention) |
 | HF cache | Drop-in `DynamicCache` replacement for HuggingFace models |
-| vLLM backend | `QuashKVModelManager` for vLLM serving integration |
+| vLLM backend | `QuashKVModelManager` architectural scaffolding (registration requires GPU testing) |
 | NN search | `QuashIndex` for approximate maximum inner-product search |
 
 ## Installation
@@ -121,7 +121,7 @@ quashkv/
 ├── constants.py         # Block sizes, defaults
 ├── integrations/
 │   ├── hf_cache.py      # HuggingFace DynamicCache replacement
-│   └── vllm_backend.py  # vLLM attention backend
+│   └── vllm_backend.py  # vLLM backend scaffolding (not yet registered)
 ├── nn_search/
 │   └── index.py         # QuashIndex for vector search
 └── triton_kernels/
@@ -306,12 +306,12 @@ pytest
 | Compressed perplexity eval | ✅ WikiText-2 (2 models) | ❌ | ❌ | ❌ |
 | Vector search | Full NN search module | ❌ | N/A | N/A |
 | Outlier handling | Mixed-precision adaptive | ❌ | Per-channel | None |
-| Serving integration | vLLM + HuggingFace | Standalone notebook | HuggingFace | HuggingFace |
+| Serving integration | HuggingFace (production) + vLLM (scaffolding) | Standalone notebook | HuggingFace | HuggingFace |
 | Theoretical guarantees | Full paper bounds verified | Partial | None | None |
 | Bit-width configs | 2, 2.5, 3, 3.5, 4-bit | 3-bit only | 2-bit | 4-bit |
 | Multi-model validation | TinyLlama, Mistral 7B | Qwen 2.5-1.5B only | Llama | Llama |
 | Test coverage | 175 tests | ~5 tests | Minimal | Minimal |
-| Lines of code | ~4,090 | ~2,000 | — | — |
+| Lines of code | ~3,280 | ~2,000 | — | — |
 
 ### Where cuTile Is Stronger (and why)
 
@@ -353,7 +353,7 @@ No other TurboQuant implementation has published compressed perplexity numbers. 
 
 **4. Multi-model validation.** cuTile tested on Qwen 2.5-1.5B only. We validated on two architecturally different models (TinyLlama head_dim=64, Mistral 7B head_dim=128), which revealed that **2-bit quality depends heavily on head_dim** — a finding you can't discover from a single model.
 
-**5. Production integration.** QuashKV provides drop-in replacements for HuggingFace's `DynamicCache` and a vLLM attention backend. cuTile's demo is a standalone notebook. If you want to actually deploy compressed KV in a serving pipeline, QuashKV is plug-and-play.
+**5. Production integration.** QuashKV provides a drop-in replacement for HuggingFace's `DynamicCache` that works with `model.generate()`. A vLLM backend is architecturally implemented (`QuashKVModelManager`, `QuashKVPageManager`) but registration requires GPU testing with vLLM's attention metadata builders — it's not yet plug-and-play for vLLM.
 
 **6. Flexible bit-widths.** 2, 2.5, 3, 3.5, and 4-bit configurations, with per-channel mixed precision that allocates extra bits to outlier channels. cuTile is hardcoded to 3-bit (2-bit MSE + 1-bit QJL for keys, 3-bit MSE for values).
 
@@ -397,7 +397,7 @@ The implementations are complementary. If you have a B200 and want maximum throu
 ### Integration Classes
 
 - **`QuashKVCache`** — HuggingFace `DynamicCache` replacement.
-- **`QuashKVModelManager`** / **`QuashKVPageManager`** — vLLM integration.
+- **`QuashKVModelManager`** / **`QuashKVPageManager`** — vLLM integration scaffolding (not yet registered).
 
 ### Utilities
 

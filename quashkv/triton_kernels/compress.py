@@ -98,7 +98,7 @@ def _compress_ip_pytorch(
 
 
 # ======================================================================
-# Triton kernel stubs (to be filled when GPU is available)
+# Triton kernels
 # ======================================================================
 
 if HAS_TRITON:
