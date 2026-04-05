@@ -125,6 +125,35 @@ def generate_standard(model, input_ids, max_new_tokens, temperature=1.0):
 
 
 # ======================================================================
+# KV extraction helper (transformers version-compatible)
+# ======================================================================
+
+def _extract_kv_pairs(past_key_values, num_layers):
+    """Extract list of (key, value) tensors from model's past_key_values.
+
+    Works with DynamicCache (4.36+), transformers 5.x, and legacy tuples.
+    """
+    # Try DynamicCache.key_cache attribute (transformers 4.36-4.x)
+    if hasattr(past_key_values, "key_cache") and hasattr(past_key_values, "value_cache"):
+        return [(past_key_values.key_cache[i], past_key_values.value_cache[i])
+                for i in range(num_layers)]
+
+    # Try indexing (transformers 5.x DynamicCache or legacy tuples)
+    pairs = []
+    for i in range(num_layers):
+        item = past_key_values[i]
+        if isinstance(item, (list, tuple)):
+            pairs.append((item[0], item[1]))
+        elif hasattr(item, "key_state") and hasattr(item, "value_state"):
+            pairs.append((item.key_state, item.value_state))
+        else:
+            # Last resort: assume it's a 2-tuple-like object
+            k, v = item
+            pairs.append((k, v))
+    return pairs
+
+
+# ======================================================================
 # Compressed generation (QuashKV)
 # ======================================================================
 
@@ -160,14 +189,11 @@ def generate_compressed(model, input_ids, max_new_tokens, bits, seed,
     # --- Prefill: get KV cache from full prompt ---
     prompt = input_ids.to(device)
     outputs = model(input_ids=prompt, use_cache=True)
+    last_logits = outputs.logits[:, -1, :]
 
-    # Extract native KV pairs
+    # Extract native KV pairs (version-compatible)
     native_kv = outputs.past_key_values
-    if hasattr(native_kv, "key_cache"):
-        kv_pairs = [(native_kv.key_cache[i], native_kv.value_cache[i])
-                    for i in range(len(native_kv.key_cache))]
-    else:
-        kv_pairs = [(item[0], item[1]) for item in native_kv]
+    kv_pairs = _extract_kv_pairs(native_kv, num_layers)
 
     # Build compressed cache
     config = QuashKVCacheConfig(key_bits=bits, value_bits=bits, seed=seed)
@@ -191,43 +217,6 @@ def generate_compressed(model, input_ids, max_new_tokens, bits, seed,
 
     # --- Decode loop ---
     generated = prompt.clone()
-    logits = None
-
-    # We need to get the first logits from the prefill
-    # Re-run just to get logits (the KV is already compressed)
-    # Actually, we already have them from the prefill — let me fix this
-    # The prefill outputs already gave us logits
-    # But we deleted outputs. Let's redo this more cleanly:
-
-    # Restart — keep the logits from prefill
-    del cache
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    # Clean approach: prefill, save logits AND compress KV
-    outputs = model(input_ids=prompt, use_cache=True)
-    last_logits = outputs.logits[:, -1, :]
-
-    native_kv = outputs.past_key_values
-    if hasattr(native_kv, "key_cache"):
-        kv_pairs = [(native_kv.key_cache[i], native_kv.value_cache[i])
-                    for i in range(len(native_kv.key_cache))]
-    else:
-        kv_pairs = [(item[0], item[1]) for item in native_kv]
-
-    cache = QuashKVCache(
-        num_layers=num_layers,
-        head_dim=head_dim,
-        config=config,
-        device=str(device),
-    )
-
-    for layer_idx, (k, v) in enumerate(kv_pairs):
-        cache.update(k.float(), v.float(), layer_idx=layer_idx)
-
-    del native_kv, kv_pairs, outputs
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
     t_prefill = time.perf_counter() - t_start
 
@@ -247,25 +236,17 @@ def generate_compressed(model, input_ids, max_new_tokens, bits, seed,
 
         # Forward pass with just the new token
         # We need to provide the decompressed KV as past_key_values
-        # Build a tuple of (key, value) per layer for the model
-        past_kv_tuple = []
-        for layer_idx in range(num_layers):
-            k, v = cache[layer_idx]
-            # Model expects same dtype as its parameters
-            model_dtype = next(model.parameters()).dtype
-            past_kv_tuple.append((k.to(model_dtype), v.to(model_dtype)))
+        # Build a DynamicCache with our decompressed tensors
+        model_dtype = next(model.parameters()).dtype
 
-        # Create a DynamicCache-like wrapper that the model can use
         from transformers import DynamicCache
         hf_cache = DynamicCache()
-        for layer_idx, (k_dec, v_dec) in enumerate(past_kv_tuple):
-            # DynamicCache stores in key_cache/value_cache lists
-            hf_cache.key_cache.append(k_dec)
-            hf_cache.value_cache.append(v_dec)
-            # Track seen tokens
-            if layer_idx == 0:
-                if hasattr(hf_cache, '_seen_tokens'):
-                    hf_cache._seen_tokens = k_dec.shape[-2]
+        for layer_idx in range(num_layers):
+            k, v = cache[layer_idx]
+            k_dec = k.to(model_dtype)
+            v_dec = v.to(model_dtype)
+            # Use the update() method which works across transformers versions
+            hf_cache.update(k_dec, v_dec, layer_idx)
 
         outputs = model(
             input_ids=next_token,
@@ -276,17 +257,12 @@ def generate_compressed(model, input_ids, max_new_tokens, bits, seed,
 
         # Extract the new KV pair (only the new single token) and compress
         new_kv = outputs.past_key_values
-        if hasattr(new_kv, "key_cache"):
-            for layer_idx in range(num_layers):
-                # The new cache has all tokens; we only want the last one
-                new_k = new_kv.key_cache[layer_idx][:, :, -1:, :]
-                new_v = new_kv.value_cache[layer_idx][:, :, -1:, :]
-                cache.update(new_k.float(), new_v.float(), layer_idx=layer_idx)
-        else:
-            for layer_idx in range(num_layers):
-                new_k = new_kv[layer_idx][0][:, :, -1:, :]
-                new_v = new_kv[layer_idx][1][:, :, -1:, :]
-                cache.update(new_k.float(), new_v.float(), layer_idx=layer_idx)
+        new_kv_pairs = _extract_kv_pairs(new_kv, num_layers)
+
+        for layer_idx, (nk, nv) in enumerate(new_kv_pairs):
+            # Cache already has old tokens; only compress the last (new) one
+            cache.update(nk[:, :, -1:, :].float(), nv[:, :, -1:, :].float(),
+                         layer_idx=layer_idx)
 
         del hf_cache, past_kv_tuple, outputs, new_kv
         if torch.cuda.is_available():
