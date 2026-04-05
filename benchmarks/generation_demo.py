@@ -196,54 +196,20 @@ def _extract_kv_pairs(past_key_values, num_layers):
 # Cache wrapper for transformers 5.x compatibility
 # ======================================================================
 
-class _DecompressedCacheWrapper:
-    """Minimal cache wrapper that satisfies transformers 5.x LlamaModel.
+def _build_hf_cache_from_quash(quash_cache, num_layers, model_dtype):
+    """Build a real DynamicCache populated with our decompressed KV.
 
-    Takes decompressed KV from our QuashKVCache and presents them via the
-    interface transformers expects: get_seq_length() and update().
-
-    On update(), the model passes the freshly computed KV for the new token.
-    We concatenate it with our decompressed old KV and return the full tensors
-    for the model's attention computation.
+    Uses DynamicCache.update() — the stable API across all transformers
+    versions — to properly initialize all internal state (seen_tokens,
+    mask sizes, etc.).
     """
+    from transformers import DynamicCache
 
-    def __init__(self, quash_cache, num_layers, model_dtype):
-        self._num_layers = num_layers
-        self._model_dtype = model_dtype
-        self._layers = []  # list of [key_tensor, value_tensor]
-        for layer_idx in range(num_layers):
-            k, v = quash_cache[layer_idx]
-            self._layers.append([k.to(model_dtype), v.to(model_dtype)])
-
-    def get_seq_length(self, layer_idx: int = 0) -> int:
-        if layer_idx < len(self._layers):
-            return self._layers[layer_idx][0].shape[-2]
-        return 0
-
-    def get_max_cache_length(self):
-        return None
-
-    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
-        """Concatenate new KV with existing decompressed KV."""
-        if layer_idx < len(self._layers):
-            old_k, old_v = self._layers[layer_idx]
-            new_k = torch.cat([old_k, key_states], dim=-2)
-            new_v = torch.cat([old_v, value_states], dim=-2)
-        else:
-            new_k = key_states
-            new_v = value_states
-        self._layers[layer_idx] = [new_k, new_v]
-        return new_k, new_v
-
-    def __len__(self):
-        return self._num_layers
-
-    def __getitem__(self, idx):
-        return tuple(self._layers[idx])
-
-    def __iter__(self):
-        for layer in self._layers:
-            yield tuple(layer)
+    hf_cache = DynamicCache()
+    for layer_idx in range(num_layers):
+        k, v = quash_cache[layer_idx]
+        hf_cache.update(k.to(model_dtype), v.to(model_dtype), layer_idx)
+    return hf_cache
 
 
 # ======================================================================
@@ -328,14 +294,13 @@ def generate_compressed(model, input_ids, max_new_tokens, bits, seed,
             break
 
         # Forward pass with just the new token
-        # Build a lightweight cache wrapper with our decompressed KV
+        # Build a proper DynamicCache with our decompressed KV
         model_dtype = next(model.parameters()).dtype
-
-        wrapper = _DecompressedCacheWrapper(cache, num_layers, model_dtype)
+        hf_cache = _build_hf_cache_from_quash(cache, num_layers, model_dtype)
 
         outputs = model(
             input_ids=next_token,
-            past_key_values=wrapper,
+            past_key_values=hf_cache,
             use_cache=True,
         )
         last_logits = outputs.logits[:, -1, :]
@@ -349,7 +314,7 @@ def generate_compressed(model, input_ids, max_new_tokens, bits, seed,
             cache.update(nk[:, :, -1:, :].float(), nv[:, :, -1:, :].float(),
                          layer_idx=layer_idx)
 
-        del wrapper, outputs, new_kv
+        del hf_cache, outputs, new_kv
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
