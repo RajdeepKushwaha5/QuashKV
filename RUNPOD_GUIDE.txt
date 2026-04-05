@@ -106,6 +106,18 @@
 
     python benchmarks/perplexity_eval.py --model mistralai/Mistral-7B-v0.3 --bits 2 3 4 --max-tokens 4096 --dtype float16
 
+  Command 4 — End-to-end generation demo (TinyLlama, 3-bit):
+
+    python benchmarks/generation_demo.py
+
+  Command 5 — Generation demo (Mistral 7B, 3-bit):
+
+    python benchmarks/generation_demo.py --model mistralai/Mistral-7B-v0.3 --dtype float16
+
+  Command 6 — Generation demo (TinyLlama, 2-bit aggressive):
+
+    python benchmarks/generation_demo.py --bits 2
+
   Copy the output from each command for the README.
 
 ================================================================
