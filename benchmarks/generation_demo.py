@@ -104,8 +104,11 @@ def generate_standard(model, input_ids, max_new_tokens, temperature=1.0):
 
         generated = torch.cat([generated, next_token], dim=-1)
 
-        if next_token.item() == model.config.eos_token_id:
-            break
+        eos_id = model.config.eos_token_id
+        if eos_id is not None:
+            eos_ids = eos_id if isinstance(eos_id, list) else [eos_id]
+            if next_token.item() in eos_ids:
+                break
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -276,8 +279,7 @@ def generate_compressed(model, input_ids, max_new_tokens, bits, seed,
 
     # --- Decode loop ---
     generated = prompt.clone()
-
-    t_prefill = time.perf_counter() - t_start
+    model_dtype = next(model.parameters()).dtype
 
     # Now decode token by token
     for step in range(max_new_tokens):
@@ -290,12 +292,14 @@ def generate_compressed(model, input_ids, max_new_tokens, bits, seed,
 
         generated = torch.cat([generated, next_token], dim=-1)
 
-        if next_token.item() == model_config.eos_token_id:
-            break
+        eos_id = model_config.eos_token_id
+        if eos_id is not None:
+            eos_ids = eos_id if isinstance(eos_id, list) else [eos_id]
+            if next_token.item() in eos_ids:
+                break
 
         # Forward pass with just the new token
         # Build a proper DynamicCache with our decompressed KV
-        model_dtype = next(model.parameters()).dtype
         hf_cache = _build_hf_cache_from_quash(cache, num_layers, model_dtype)
 
         outputs = model(
@@ -407,11 +411,19 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        torch_dtype=dtype_map[args.dtype],
-        device_map=args.device,
-    )
+    # Use 'dtype' (transformers 5.x) with 'torch_dtype' fallback (4.x)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            dtype=dtype_map[args.dtype],
+            device_map=args.device,
+        )
+    except TypeError:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype=dtype_map[args.dtype],
+            device_map=args.device,
+        )
     model.eval()
     model_mem = gpu_memory_mb()
     print(f"  Loaded in {time.time() - t0:.1f}s  "
@@ -455,33 +467,39 @@ def main():
             torch.cuda.empty_cache()
         gc.collect()
 
-        result_cmp = generate_compressed(
-            model, input_ids, args.max_new_tokens,
-            bits=args.bits, seed=args.seed, temperature=0,
-        )
+        try:
+            result_cmp = generate_compressed(
+                model, input_ids, args.max_new_tokens,
+                bits=args.bits, seed=args.seed, temperature=0,
+            )
 
-        text_cmp = tokenizer.decode(
-            result_cmp["token_ids"][0, prompt_len:], skip_special_tokens=True
-        )
-        print(f"    Tokens: {result_cmp['n_generated']}  |  "
-              f"Time: {result_cmp['elapsed']:.2f}s  |  "
-              f"Speed: {result_cmp['tok_per_sec']:.1f} tok/s  |  "
-              f"Compression: {result_cmp['compression_ratio']:.1f}x")
+            text_cmp = tokenizer.decode(
+                result_cmp["token_ids"][0, prompt_len:], skip_special_tokens=True
+            )
+            print(f"    Tokens: {result_cmp['n_generated']}  |  "
+                  f"Time: {result_cmp['elapsed']:.2f}s  |  "
+                  f"Speed: {result_cmp['tok_per_sec']:.1f} tok/s  |  "
+                  f"Compression: {result_cmp['compression_ratio']:.1f}x")
 
-        # --- Comparison ---
-        comp = compare_outputs(
-            result_std["token_ids"], result_cmp["token_ids"], prompt_len
-        )
+            # --- Comparison ---
+            comp = compare_outputs(
+                result_std["token_ids"], result_cmp["token_ids"], prompt_len
+            )
 
-        print()
-        print("  --- Standard Output ---")
-        print(f"  {text_std[:300]}")
-        print()
-        print(f"  --- Compressed Output ({args.bits}-bit) ---")
-        print(f"  {text_cmp[:300]}")
-        print()
-        print(f"  Token match rate: {comp['match_rate']:.1%}  "
-              f"(first divergence at token {comp['first_divergence']})")
+            print()
+            print("  --- Standard Output ---")
+            print(f"  {text_std[:300]}")
+            print()
+            print(f"  --- Compressed Output ({args.bits}-bit) ---")
+            print(f"  {text_cmp[:300]}")
+            print()
+            print(f"  Token match rate: {comp['match_rate']:.1%}  "
+                  f"(first divergence at token {comp['first_divergence']})")
+        except Exception as e:
+            print(f"    ERROR in compressed generation: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            result_cmp = None
         print()
 
     # ---- Summary ----
@@ -500,21 +518,28 @@ def main():
     seq_len = prompt_len + args.max_new_tokens
 
     fp16_kv_mb = (2 * n_layers * n_kv_heads * seq_len * head_dim * 2) / (1024 * 1024)
-    compressed_kv_mb = fp16_kv_mb / result_cmp["compression_ratio"] if result_cmp["compression_ratio"] > 0 else fp16_kv_mb
 
     print(f"  Model:              {args.model}")
     print(f"  Layers:             {n_layers}")
     print(f"  KV heads:           {n_kv_heads}")
     print(f"  Head dim:           {head_dim}")
     print(f"  Sequence length:    {seq_len} tokens")
-    print(f"  Compression:        {bits}-bit → {result_cmp['compression_ratio']:.1f}x")
     print(f"  FP16 KV cache:      {fp16_kv_mb:.1f} MB")
-    print(f"  Compressed KV:      {compressed_kv_mb:.1f} MB")
-    print(f"  Memory saved:       {fp16_kv_mb - compressed_kv_mb:.1f} MB "
-          f"({(1 - compressed_kv_mb / fp16_kv_mb) * 100:.0f}%)")
+
+    if result_cmp is not None:
+        cmp_ratio = result_cmp["compression_ratio"]
+        compressed_kv_mb = fp16_kv_mb / cmp_ratio if cmp_ratio > 0 else fp16_kv_mb
+        print(f"  Compression:        {bits}-bit → {cmp_ratio:.1f}x")
+        print(f"  Compressed KV:      {compressed_kv_mb:.1f} MB")
+        print(f"  Memory saved:       {fp16_kv_mb - compressed_kv_mb:.1f} MB "
+              f"({(1 - compressed_kv_mb / fp16_kv_mb) * 100:.0f}%)")
+    else:
+        print(f"  Compression:        {bits}-bit (failed — see errors above)")
+
     print()
     print(f"  Standard speed:     {result_std['tok_per_sec']:.1f} tok/s")
-    print(f"  Compressed speed:   {result_cmp['tok_per_sec']:.1f} tok/s")
+    if result_cmp is not None:
+        print(f"  Compressed speed:   {result_cmp['tok_per_sec']:.1f} tok/s")
     print()
     print("=" * 70)
     print("  Done!")
