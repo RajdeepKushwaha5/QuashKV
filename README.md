@@ -220,6 +220,32 @@ Baseline perplexity: **5.06** (4096 tokens, fp16, no compression)
 
 > 4-bit value cosine is 0.995+ on both models — near-lossless. Even at 2-bit, value cosine stays above 0.94. Quality is consistent across 22- and 32-layer models, confirming the theoretical guarantees scale with depth.
 
+### End-to-End Generation — TinyLlama 1.1B (A100)
+
+Side-by-side text generation comparing standard (uncompressed) vs. 3-bit compressed KV cache:
+
+| Metric | Standard | 3-bit Compressed |
+|--------|----------|------------------|
+| Decode speed | 65 tok/s | 3.3 tok/s |
+| KV cache size | 2.4 MB | 0.5 MB |
+| Compression | 1.0× | **4.6×** |
+| Memory saved | — | **78%** |
+
+**Sample output** (prompt: *"In a small village nestled between mountains,"*):
+
+> **Standard:** *a young woman named Lily lives a simple life. She works as a cook in a local inn, and her days are filled with the sounds of birds chirping and the rustling of leaves in the wind…*
+>
+> **3-bit compressed:** *a young woman named Lily had a secret. She had been raised by her grandmother, who had been a kind and loving woman, but Lily had never known her mother…*
+
+Both outputs are fluent and coherent. Token divergence is expected — lossy compression perturbs the KV cache slightly, causing the autoregressive path to explore different (but equally valid) continuations. The compressed decode speed reflects per-token decompress→forward→recompress overhead; the fused Triton kernel eliminates decompression entirely for attention-bound workloads.
+
+```bash
+# Run generation demo
+python benchmarks/generation_demo.py
+python benchmarks/generation_demo.py --bits 2      # 2-bit aggressive
+python benchmarks/generation_demo.py --model mistralai/Mistral-7B-Instruct-v0.3 --dtype float16
+```
+
 ### Run Benchmarks
 
 ```bash
@@ -253,6 +279,7 @@ pytest
 |--------|---------|----------------------|------|------------|
 | Hardware | Any GPU (A100/H100/4090) | B200 only | Any | Any |
 | Kernel framework | PyTorch + Triton kernels | cuTile (Blackwell-locked) | PyTorch | PyTorch |
+| End-to-end generation | ✅ Side-by-side demo | ✅ Llama 3 demo | ❌ | ❌ |
 | Vector search | Full NN search module | Not implemented | N/A | N/A |
 | Outlier handling | Mixed-precision adaptive | Not implemented | Per-channel | None |
 | Serving integration | vLLM + HuggingFace | Standalone notebook | HuggingFace | HuggingFace |
